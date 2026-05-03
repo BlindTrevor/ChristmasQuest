@@ -53,7 +53,7 @@ Connect each button between the listed pin and **GND** (internal pull-up resisto
 | BTN 1  | 2        | Show instructions |
 | BTN 2  | 3        | Reset (turn off LED) |
 | BTN 3  | 4        | Show LED status |
-| BTN 4  | 5        | UID helper hint |
+| BTN 4  | 5        | Store fob (enter/cancel store mode) |
 
 ---
 
@@ -67,22 +67,33 @@ Install the following libraries via the Arduino IDE Library Manager
 | `MFRC522` | Miguel Balboa (miguelbalboa) |
 | `LiquidCrystal_I2C` | Frank de Brabander |
 
+> `EEPROM` is built into the Arduino core — no separate installation needed.
+
+---
+
+## Storing a Fob at Runtime
+
+The correct fob's UID is saved in the Mega's EEPROM and loaded automatically on every boot. You can change it at any time **without recompiling**:
+
+1. Press **Button 4** — the LCD shows `STORE MODE: scan fob`.  
+2. Hold your chosen fob against the reader.  
+3. The LCD confirms `** FOB STORED **` and Serial Monitor prints the new UID.  
+4. Press **Button 4** again *before* scanning to cancel store mode.
+
+The stored UID survives power cycles. On first boot (no fob stored yet) the sketch falls back to the `correctUID[]` array compiled into the sketch.
+
 ---
 
 ## First-Time Setup: Finding Your Fob's UID
 
-1. Open `ChristmasQuest.ino` in the Arduino IDE.
-2. Upload the sketch to your Mega.
-3. Open **Tools → Serial Monitor** at **9600 baud**.
-4. Scan your RFID fob — the UID is printed to the serial output.
-5. Copy the UID bytes into the `correctUID[]` array near the top of the sketch:
+You no longer need to edit the sketch to set the correct fob — just use Button 4 as described above.
+
+If you prefer to hard-code the UID as the compile-time default, you can still scan your fob and read the UID from the Serial Monitor (9600 baud), then edit `correctUID[]` near the top of the sketch:
 
 ```cpp
 byte correctUID[]   = { 0xAB, 0xCD, 0xEF, 0x12 };  // ← your bytes here
 byte correctUIDSize = 4;
 ```
-
-6. Re-upload the sketch. Now only that fob will activate the LED.
 
 ---
 
@@ -93,7 +104,7 @@ byte correctUIDSize = 4;
 - **Button 1** – Display instructions on the LCD.  
 - **Button 2** – Reset / turn the LED off.  
 - **Button 3** – Show current LED status.  
-- **Button 4** – Reminder to scan a fob and check the Serial Monitor for its UID.
+- **Button 4** – Enter store mode (scan next fob to save it as the correct one; press again to cancel).
 
 ---
 
@@ -101,7 +112,9 @@ byte correctUIDSize = 4;
 
 ```
 ChristmasQuest ready.
-Scan a fob to begin.
+Loaded stored fob UID: AB CD EF 12
 Correct fob! LED activated.
-Wrong fob! UID: AB CD EF 12
+Wrong fob! UID: 11 22 33 44
+Store mode: scan the fob you want to register.
+Fob stored! New UID: AB CD EF 12
 ```

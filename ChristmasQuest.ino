@@ -22,6 +22,7 @@
 #include <MFRC522.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
+#include <EEPROM.h>
 
 // ── Pin Definitions ──────────────────────────────────────────────────────────
 
@@ -50,17 +51,29 @@ MFRC522 mfrc522(SS_PIN, RST_PIN);
 
 // ── Correct Fob UID ──────────────────────────────────────────────────────────
 //
-// Replace these bytes with the UID of your own RFID fob.
-// Upload the sketch and scan your fob once – the UID is printed to the
-// Serial Monitor (Tools → Serial Monitor, 9600 baud).  Then copy the
-// printed bytes here, recompile, and upload again.
+// This is the fallback UID used when no fob has been stored in EEPROM yet.
+// To set the correct fob at runtime, press Button 4 and scan a fob.
+// The new UID is saved to EEPROM and survives power cycles.
 //
 byte correctUID[]   = { 0xDE, 0xAD, 0xBE, 0xEF };
 byte correctUIDSize = 4;
 
+// ── EEPROM Layout ─────────────────────────────────────────────────────────────
+//
+// Address 0 : sentinel byte (EEPROM_SENTINEL = 0xC5 means "valid UID stored")
+// Address 1 : UID size in bytes (typically 4 or 7)
+// Address 2+ : UID bytes
+//
+#define EEPROM_SENTINEL     0xC5
+#define EEPROM_ADDR_SENTINEL  0
+#define EEPROM_ADDR_SIZE      1
+#define EEPROM_ADDR_UID       2
+#define EEPROM_MAX_UID_SIZE   10  // MFRC522 UIDs are at most 10 bytes
+
 // ── State ────────────────────────────────────────────────────────────────────
 
 bool ledActive = false;
+bool storeMode = false;   // when true, the next scanned fob is saved as correct
 
 // Non-blocking display timeout.
 // Use start-time + duration (subtraction-based) to be safe at millis() rollover.
@@ -77,8 +90,15 @@ void showHome() {
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("  Christmas Quest!  ");
-  lcd.setCursor(0, 1);
-  lcd.print("Scan your fob...    ");
+  if (storeMode) {
+    lcd.setCursor(0, 1);
+    lcd.print("STORE MODE: scan fob");
+    lcd.setCursor(0, 2);
+    lcd.print("Btn4 again to cancel");
+  } else {
+    lcd.setCursor(0, 1);
+    lcd.print("Scan your fob...    ");
+  }
   lcd.setCursor(0, 3);
   lcd.print(ledActive ? "LED: ON             " : "LED: OFF            ");
 }
@@ -88,6 +108,30 @@ void showHome() {
 void scheduleHome(unsigned long durationMs) {
   showHomeScheduledAt = millis();
   showHomeDuration    = durationMs;
+}
+
+// ── EEPROM helpers ────────────────────────────────────────────────────────────
+
+// Save the current correctUID / correctUIDSize to EEPROM.
+void saveUIDToEEPROM() {
+  EEPROM.update(EEPROM_ADDR_SENTINEL, EEPROM_SENTINEL);
+  EEPROM.update(EEPROM_ADDR_SIZE, correctUIDSize);
+  for (byte i = 0; i < correctUIDSize; i++) {
+    EEPROM.update(EEPROM_ADDR_UID + i, correctUID[i]);
+  }
+}
+
+// Load a UID from EEPROM into correctUID / correctUIDSize.
+// Returns true if a valid UID was found, false otherwise.
+bool loadUIDFromEEPROM() {
+  if (EEPROM.read(EEPROM_ADDR_SENTINEL) != EEPROM_SENTINEL) return false;
+  byte size = EEPROM.read(EEPROM_ADDR_SIZE);
+  if (size == 0 || size > EEPROM_MAX_UID_SIZE) return false;
+  correctUIDSize = size;
+  for (byte i = 0; i < correctUIDSize; i++) {
+    correctUID[i] = EEPROM.read(EEPROM_ADDR_UID + i);
+  }
+  return true;
 }
 
 // ── Helper: print a UID to Serial ────────────────────────────────────────────
@@ -161,6 +205,41 @@ void handleWrongFob() {
   scheduleHome(2000);
 }
 
+// Called when storeMode is active and a fob is scanned.
+void handleStoreFob() {
+  byte size = mfrc522.uid.size;
+  if (size == 0 || size > EEPROM_MAX_UID_SIZE) {
+    Serial.println(F("Store failed: invalid UID size."));
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Store FAILED:       ");
+    lcd.setCursor(0, 1);
+    lcd.print("Invalid UID size.   ");
+    storeMode = false;
+    scheduleHome(2000);
+    return;
+  }
+
+  correctUIDSize = size;
+  for (byte i = 0; i < size; i++) {
+    correctUID[i] = mfrc522.uid.uidByte[i];
+  }
+  saveUIDToEEPROM();
+  storeMode = false;
+
+  Serial.print(F("Fob stored! New UID: "));
+  printUID(correctUID, correctUIDSize);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("** FOB STORED **    ");
+  lcd.setCursor(0, 1);
+  lcd.print("New fob saved!      ");
+  lcd.setCursor(0, 2);
+  lcd.print("Scan it to activate.");
+  scheduleHome(3000);
+}
+
 // ── Button Handlers ───────────────────────────────────────────────────────────
 
 void handleButtonInstructions() {
@@ -194,15 +273,17 @@ void handleButtonStatus() {
   scheduleHome(2500);
 }
 
-void handleButtonUIDHelper() {
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("UID Helper:         ");
-  lcd.setCursor(0, 1);
-  lcd.print("Scan any fob now.   ");
-  lcd.setCursor(0, 2);
-  lcd.print("UID -> Serial port. ");
-  scheduleHome(2000);
+void handleButtonStoreFob() {
+  if (storeMode) {
+    // Second press cancels store mode
+    storeMode = false;
+    Serial.println(F("Store mode cancelled."));
+    showHome();
+    return;
+  }
+  storeMode = true;
+  Serial.println(F("Store mode: scan the fob you want to register."));
+  showHome();
 }
 
 // ── setup() ──────────────────────────────────────────────────────────────────
@@ -229,7 +310,14 @@ void setup() {
   }
 
   Serial.println(F("ChristmasQuest ready."));
-  Serial.println(F("Scan a fob to begin."));
+
+  if (loadUIDFromEEPROM()) {
+    Serial.print(F("Loaded stored fob UID: "));
+    printUID(correctUID, correctUIDSize);
+  } else {
+    Serial.println(F("No stored fob found. Using default UID."));
+    Serial.println(F("Press Btn4 and scan a fob to store one."));
+  }
 
   showHome();
 }
@@ -247,7 +335,7 @@ void loop() {
   if      (btn == 0) handleButtonInstructions();
   else if (btn == 1) handleButtonReset();
   else if (btn == 2) handleButtonStatus();
-  else if (btn == 3) handleButtonUIDHelper();
+  else if (btn == 3) handleButtonStoreFob();
 
   // ── RFID handling ──────────────────────────────────────────────────────────
   // Wait for a new card
@@ -255,7 +343,9 @@ void loop() {
   // Read the card serial number
   if (!mfrc522.PICC_ReadCardSerial())   return;
 
-  if (isCorrectFob()) {
+  if (storeMode) {
+    handleStoreFob();
+  } else if (isCorrectFob()) {
     handleCorrectFob();
   } else {
     handleWrongFob();
