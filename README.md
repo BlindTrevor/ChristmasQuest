@@ -106,6 +106,8 @@ byte correctUIDSize = 4;
 - **Button 3** – Show current LED status.  
 - **Button 4** – Enter store mode (scan next fob to save it as the correct one; press again to cancel).
 
+> **LED auto-reset:** The LED turns off automatically **5 seconds** after it is activated. Scanning the correct fob again while the LED is on restarts the 5-second timer. Button 2 still resets the LED immediately at any time.
+
 ---
 
 ## Serial Monitor Output
@@ -117,4 +119,5 @@ Correct fob! LED activated.
 Wrong fob! UID: 11 22 33 44
 Store mode: scan the fob you want to register.
 Fob stored! New UID: AB CD EF 12
+LED auto-reset after 5 s.
 ```
