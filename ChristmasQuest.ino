@@ -40,6 +40,10 @@ static const uint8_t NUM_BUTTONS = 4;
 // Debounce period in milliseconds
 #define DEBOUNCE_MS 50UL
 
+// LED auto-reset timeout: the LED turns off automatically after this many ms.
+// The timer resets each time the LED is re-activated within the window.
+#define LED_AUTO_RESET_MS 5000UL
+
 // ── Object Instances ─────────────────────────────────────────────────────────
 
 // LCD: 20 columns × 4 rows at I2C address 0x27
@@ -74,6 +78,9 @@ byte correctUIDSize = 4;
 
 bool ledActive = false;
 bool storeMode = false;   // when true, the next scanned fob is saved as correct
+
+// Timestamp (millis()) of the last LED activation; used for the auto-reset timer.
+unsigned long ledActivatedAt = 0;
 
 // Non-blocking display timeout.
 // Use start-time + duration (subtraction-based) to be safe at millis() rollover.
@@ -177,6 +184,7 @@ int8_t readButtonPress() {
 
 void handleCorrectFob() {
   ledActive = true;
+  ledActivatedAt = millis();   // (re-)start the 5-second auto-reset timer
   digitalWrite(LED_PIN, HIGH);
 
   Serial.println(F("Correct fob! LED activated."));
@@ -257,6 +265,7 @@ void handleButtonInstructions() {
 
 void handleButtonReset() {
   ledActive = false;
+  ledActivatedAt = 0;   // clear the auto-reset timer
   digitalWrite(LED_PIN, LOW);
   Serial.println(F("LED reset."));
   showHome();
@@ -327,6 +336,15 @@ void setup() {
 void loop() {
   // ── Non-blocking display timeout ──────────────────────────────────────────
   if (showHomeDuration != 0 && (millis() - showHomeScheduledAt) >= showHomeDuration) {
+    showHome();
+  }
+
+  // ── LED auto-reset after LED_AUTO_RESET_MS (non-blocking) ─────────────────
+  if (ledActive && ledActivatedAt != 0 && (millis() - ledActivatedAt) >= LED_AUTO_RESET_MS) {
+    ledActive = false;
+    ledActivatedAt = 0;
+    digitalWrite(LED_PIN, LOW);
+    Serial.println(F("LED auto-reset after 5 s."));
     showHome();
   }
 
