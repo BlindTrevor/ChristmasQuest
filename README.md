@@ -69,12 +69,14 @@ Pin:  1    2    3    4    5    6    7
 Keypad button layout and functions:
 
 ```
-[ 1 ] [ 2 ] [ 3 ]    1 → Show instructions
-[ 4 ] [ 5 ] [ 6 ]    2 → Reset (turn off LED)
-[ 7 ] [ 8 ] [ 9 ]    3 → Show LED status
-[ * ] [ 0 ] [ # ]    4 → Store fob (enter/cancel store mode)
-                     5–9, *, 0, # → reserved for future use
+[ 1 ] [ 2 ] [ 3 ]    1 → Show key guide / instructions
+[ 4 ] [ 5 ] [ 6 ]    2 → Reset (turn off LED immediately)
+[ 7 ] [ 8 ] [ 9 ]    3 → Show current LED status
+[ * ] [ 0 ] [ # ]    4 → Program a fob (enter store mode; press again to cancel)
+                     5–9, *, 0, # → used for name entry (see below)
 ```
+
+The home screen always shows these shortcuts on rows 3–4, so you never need to remember them.
 
 ---
 
@@ -95,14 +97,40 @@ Install the following libraries via the Arduino IDE Library Manager
 
 ## Storing a Fob at Runtime
 
-The correct fob's UID is saved in the Mega's EEPROM and loaded automatically on every boot. You can change it at any time **without recompiling**:
+The correct fob's UID — and an optional name — are saved in the Mega's EEPROM and loaded automatically on every boot. You can change them at any time **without recompiling**:
 
-1. Press **Key `4`** on the keypad — the LCD shows `STORE MODE: scan fob`.  
+1. Press **Key `4`** — the LCD shows `STORE: scan fob now`.
 2. Hold your chosen fob against the reader.  
-3. The LCD confirms `** FOB STORED **` and Serial Monitor prints the new UID.  
-4. Press **Key `4`** again *before* scanning to cancel store mode.
+   The LCD switches to **name-entry mode**.
+3. Type a name using **Nokia-style multi-tap** (see table below), then press **`#`** to save.  
+   Press `#` immediately to save without a name.
+4. The LCD confirms `** FOB STORED **`.
 
-The stored UID survives power cycles. On first boot (no fob stored yet) the sketch falls back to the `correctUID[]` array compiled into the sketch.
+To cancel at the **scan step** (before a fob is read), press **Key `4`** again.  
+To cancel during **name entry**, delete all characters with `*` then press `*` once more.
+
+### Name-entry key map
+
+| Key | Characters (press repeatedly to cycle) |
+|-----|----------------------------------------|
+| `2` | A → B → C → 2 → A … |
+| `3` | D → E → F → 3 → D … |
+| `4` | G → H → I → 4 → G … |
+| `5` | J → K → L → 5 → J … |
+| `6` | M → N → O → 6 → M … |
+| `7` | P → Q → R → S → 7 → P … |
+| `8` | T → U → V → 8 → T … |
+| `9` | W → X → Y → Z → 9 → W … |
+| `0` | (space) → 0 → (space) … |
+| `1` | . → , → ! → ? → - → 1 → . … |
+| `*` | Backspace (delete last character) |
+| `#` | Confirm and save |
+
+A character is committed automatically after **0.8 s** of inactivity, or instantly when you press a different key — just like old Nokia phones.
+
+When the correct fob is scanned, the LCD shows `Welcome, NAME!` if a name was saved.
+
+The stored UID and name survive power cycles. On first boot (no fob stored yet) the sketch falls back to the `correctUID[]` array compiled into the sketch.
 
 ---
 
@@ -121,12 +149,14 @@ byte correctUIDSize = 4;
 
 ## How to Play
 
-- **Scan the correct fob** → `ACCESS GRANTED`, onboard LED turns **ON**.  
+The home screen always reminds you what each key does (rows 3–4).
+
+- **Scan the correct fob** → `ACCESS GRANTED` + `Welcome, NAME!`, onboard LED turns **ON**.  
 - **Scan the wrong fob** → `ACCESS DENIED`, UID is printed to Serial Monitor.  
-- **Key `1`** – Display instructions on the LCD.  
-- **Key `2`** – Reset / turn the LED off.  
+- **Key `1`** – Show the key guide on the LCD.  
+- **Key `2`** – Reset / turn the LED off immediately.  
 - **Key `3`** – Show current LED status.  
-- **Key `4`** – Enter store mode (scan next fob to save it as the correct one; press again to cancel).
+- **Key `4`** – Enter store mode to program a new fob (see *Storing a Fob* above).
 
 > **LED auto-reset:** The LED turns off automatically **5 seconds** after it is activated. Scanning the correct fob again while the LED is on restarts the 5-second timer. Key `2` still resets the LED immediately at any time.
 
@@ -140,6 +170,8 @@ Loaded stored fob UID: AB CD EF 12
 Correct fob! LED activated.
 Wrong fob! UID: 11 22 33 44
 Store mode: scan the fob you want to register.
-Fob stored! New UID: AB CD EF 12
+Fob scanned. Enter name then press #.
+Fob stored! Name: ALICE
+UID: AB CD EF 12
 LED auto-reset after 5 s.
 ```

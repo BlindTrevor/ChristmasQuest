@@ -86,15 +86,20 @@ byte correctUIDSize = 4;
 
 // ── EEPROM Layout ─────────────────────────────────────────────────────────────
 //
-// Address 0 : sentinel byte (EEPROM_SENTINEL = 0xC5 means "valid UID stored")
-// Address 1 : UID size in bytes (typically 4 or 7)
-// Address 2+ : UID bytes
+// Address 0     : sentinel byte (EEPROM_SENTINEL = 0xC5 means "valid UID stored")
+// Address 1     : UID size in bytes (typically 4 or 7)
+// Address 2–11  : UID bytes (max 10)
+// Address 12    : fob name length (0 = no name stored)
+// Address 13–28 : fob name characters (max 16)
 //
-#define EEPROM_SENTINEL     0xC5
+#define EEPROM_SENTINEL       0xC5
 #define EEPROM_ADDR_SENTINEL  0
 #define EEPROM_ADDR_SIZE      1
 #define EEPROM_ADDR_UID       2
 #define EEPROM_MAX_UID_SIZE   10  // MFRC522 UIDs are at most 10 bytes
+#define FOB_NAME_MAX_LEN      16
+#define EEPROM_ADDR_NAME_LEN  12
+#define EEPROM_ADDR_NAME      13
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -109,6 +114,50 @@ unsigned long ledActivatedAt = 0;
 unsigned long showHomeScheduledAt = 0;
 unsigned long showHomeDuration    = 0;
 
+// Name associated with the stored fob (loaded from EEPROM alongside the UID).
+char    fobNameBuf[FOB_NAME_MAX_LEN + 1] = {'\0'};
+uint8_t fobNameLen = 0;
+
+// ── Nokia multi-tap name entry ────────────────────────────────────────────────
+//
+// After scanning a fob in store mode the sketch enters nameEntryMode.
+// The user types a name using Nokia-style multi-tap then presses # to save.
+//
+//  Key  Characters cycled
+//  0    (space) 0
+//  1    . , ! ? - 1
+//  2    A B C 2
+//  3    D E F 3
+//  4    G H I 4
+//  5    J K L 5
+//  6    M N O 6
+//  7    P Q R S 7
+//  8    T U V 8
+//  9    W X Y Z 9
+//  *    Backspace (or cancel when name is empty)
+//  #    Confirm and save
+
+bool nameEntryMode = false;
+
+char    mtKey    = '\0'; // key currently being multi-tapped ('\0' = none)
+uint8_t mtCount  = 0;    // press index within the key's character set
+unsigned long mtLastMs = 0;
+
+#define MT_COMMIT_MS 800UL  // auto-commit current char after this many ms
+
+static const char* const MT_TABLE[] = {
+  " 0",     // '0': space, 0
+  ".,!?-1", // '1': punctuation
+  "ABC2",   // '2'
+  "DEF3",   // '3'
+  "GHI4",   // '4'
+  "JKL5",   // '5'
+  "MNO6",   // '6'
+  "PQRS7",  // '7'
+  "TUV8",   // '8'
+  "WXYZ9",  // '9'
+};
+
 // ── Helper: display the idle / home screen ───────────────────────────────────
 
 void showHome() {
@@ -116,17 +165,19 @@ void showHome() {
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("  Christmas Quest!  ");
+  lcd.setCursor(0, 1);
   if (storeMode) {
-    lcd.setCursor(0, 1);
-    lcd.print("STORE MODE: scan fob");
-    lcd.setCursor(0, 2);
-    lcd.print("Key4 again to cancel");
+    lcd.print("STORE: scan fob now ");
   } else {
-    lcd.setCursor(0, 1);
-    lcd.print("Scan your fob...    ");
+    // Combine scan prompt and LED state on one line
+    lcd.print(ledActive ? "Scan fob | LED: ON  " : "Scan fob | LED: OFF ");
   }
+  // Rows 2-3: always show the key guide so users know what each key does.
+  // Row 3 changes label for key 4 when store mode is active.
+  lcd.setCursor(0, 2);
+  lcd.print("1:Help    2:LED off ");
   lcd.setCursor(0, 3);
-  lcd.print(ledActive ? "LED: ON             " : "LED: OFF            ");
+  lcd.print(storeMode ? "3:Status  4:Cancel  " : "3:Status  4:Program ");
 }
 
 // Schedule an automatic return to the home screen after durationMs.
@@ -138,16 +189,21 @@ void scheduleHome(unsigned long durationMs) {
 
 // ── EEPROM helpers ────────────────────────────────────────────────────────────
 
-// Save the current correctUID / correctUIDSize to EEPROM.
+// Save the current correctUID / correctUIDSize and fob name to EEPROM.
 void saveUIDToEEPROM() {
   EEPROM.update(EEPROM_ADDR_SENTINEL, EEPROM_SENTINEL);
   EEPROM.update(EEPROM_ADDR_SIZE, correctUIDSize);
   for (byte i = 0; i < correctUIDSize; i++) {
     EEPROM.update(EEPROM_ADDR_UID + i, correctUID[i]);
   }
+  // Save name length then name bytes
+  EEPROM.update(EEPROM_ADDR_NAME_LEN, fobNameLen);
+  for (byte i = 0; i < fobNameLen; i++) {
+    EEPROM.update(EEPROM_ADDR_NAME + i, (byte)fobNameBuf[i]);
+  }
 }
 
-// Load a UID from EEPROM into correctUID / correctUIDSize.
+// Load a UID and fob name from EEPROM into correctUID / correctUIDSize / fobNameBuf.
 // Returns true if a valid UID was found, false otherwise.
 bool loadUIDFromEEPROM() {
   if (EEPROM.read(EEPROM_ADDR_SENTINEL) != EEPROM_SENTINEL) return false;
@@ -156,6 +212,18 @@ bool loadUIDFromEEPROM() {
   correctUIDSize = size;
   for (byte i = 0; i < correctUIDSize; i++) {
     correctUID[i] = EEPROM.read(EEPROM_ADDR_UID + i);
+  }
+  // Load fob name (may be absent on old EEPROM images – treat as empty)
+  byte nameLen = EEPROM.read(EEPROM_ADDR_NAME_LEN);
+  if (nameLen > 0 && nameLen <= FOB_NAME_MAX_LEN) {
+    fobNameLen = nameLen;
+    for (byte i = 0; i < fobNameLen; i++) {
+      fobNameBuf[i] = (char)EEPROM.read(EEPROM_ADDR_NAME + i);
+    }
+    fobNameBuf[fobNameLen] = '\0';
+  } else {
+    fobNameLen = 0;
+    fobNameBuf[0] = '\0';
   }
   return true;
 }
@@ -210,7 +278,15 @@ void handleCorrectFob() {
   lcd.setCursor(0, 0);
   lcd.print("** ACCESS GRANTED **");
   lcd.setCursor(0, 1);
-  lcd.print("Correct fob!        ");
+  if (fobNameLen > 0) {
+    // Build "Welcome, NAME!" padded to 20 chars.
+    // Truncate name at 10 chars: "Welcome, " (9) + name (10) + "!" (1) = 20.
+    char welcome[21];
+    snprintf(welcome, sizeof(welcome), "Welcome, %-10.10s!", fobNameBuf);
+    lcd.print(welcome);
+  } else {
+    lcd.print("Correct fob!        ");
+  }
   lcd.setCursor(0, 2);
   lcd.print("Onboard LED: ON     ");
   scheduleHome(3000);
@@ -231,6 +307,7 @@ void handleWrongFob() {
 }
 
 // Called when storeMode is active and a fob is scanned.
+// Copies the UID then enters name-entry mode so the user can label the fob.
 void handleStoreFob() {
   byte size = mfrc522.uid.size;
   if (size == 0 || size > EEPROM_MAX_UID_SIZE) {
@@ -245,24 +322,23 @@ void handleStoreFob() {
     return;
   }
 
+  // Store UID (will be written to EEPROM once the name is confirmed)
   correctUIDSize = size;
   for (byte i = 0; i < size; i++) {
     correctUID[i] = mfrc522.uid.uidByte[i];
   }
-  saveUIDToEEPROM();
   storeMode = false;
 
-  Serial.print(F("Fob stored! New UID: "));
-  printUID(correctUID, correctUIDSize);
+  // Reset name buffer and enter Nokia multi-tap name entry
+  fobNameLen   = 0;
+  fobNameBuf[0] = '\0';
+  mtKey    = '\0';
+  mtCount  = 0;
+  mtLastMs = 0;
+  nameEntryMode = true;
 
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("** FOB STORED **    ");
-  lcd.setCursor(0, 1);
-  lcd.print("New fob saved!      ");
-  lcd.setCursor(0, 2);
-  lcd.print("Scan it to activate.");
-  scheduleHome(3000);
+  Serial.println(F("Fob scanned. Enter name then press #."));
+  showNameEntry();
 }
 
 // ── Button Handlers ───────────────────────────────────────────────────────────
@@ -270,14 +346,14 @@ void handleStoreFob() {
 void handleButtonInstructions() {
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("How to play:        ");
+  lcd.print("Key guide:          ");
   lcd.setCursor(0, 1);
-  lcd.print("Scan the right fob  ");
+  lcd.print("1:Help  2:LED reset ");
   lcd.setCursor(0, 2);
-  lcd.print("to light the LED!   ");
+  lcd.print("3:Status 4:Prog fob ");
   lcd.setCursor(0, 3);
-  lcd.print("Wrong fob = denied. ");
-  scheduleHome(3000);
+  lcd.print("Scan correct fob!   ");
+  scheduleHome(4000);
 }
 
 void handleButtonReset() {
@@ -310,6 +386,147 @@ void handleButtonStoreFob() {
   storeMode = true;
   Serial.println(F("Store mode: scan the fob you want to register."));
   showHome();
+}
+
+// ── Nokia multi-tap name entry ────────────────────────────────────────────────
+
+// Render the name-entry screen.
+void showNameEntry() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Name this fob:      ");
+
+  // Row 1: confirmed chars + current cycling char + underscore cursor
+  lcd.setCursor(0, 1);
+  char row[21];
+  memset(row, ' ', 20);
+  row[20] = '\0';
+  uint8_t pos = 0;
+  for (; pos < fobNameLen && pos < 20; pos++) {
+    row[pos] = fobNameBuf[pos];
+  }
+  if (mtKey != '\0' && mtKey >= '0' && mtKey <= '9' && pos < 20) {
+    uint8_t idx = (uint8_t)(mtKey - '0');
+    const char* set = MT_TABLE[idx];
+    row[pos++] = set[mtCount % strlen(set)];
+  }
+  if (pos < 20) {
+    row[pos] = '_';   // cursor
+  }
+  lcd.print(row);
+
+  lcd.setCursor(0, 2);
+  lcd.print("*=Backsp  #=Confirm ");
+  lcd.setCursor(0, 3);
+  lcd.print("0=Space   1=.,!?-   ");
+}
+
+// Return the character currently selected by the multi-tap state.
+char getMultitapChar() {
+  if (mtKey == '\0' || mtKey < '0' || mtKey > '9') return '\0';
+  uint8_t idx = (uint8_t)(mtKey - '0');
+  if (idx >= 10) return '\0';
+  const char* set = MT_TABLE[idx];
+  return set[mtCount % strlen(set)];
+}
+
+// Commit the current cycling character to the confirmed name buffer.
+void commitMultitapChar() {
+  if (mtKey == '\0') return;
+  if (fobNameLen < FOB_NAME_MAX_LEN) {
+    fobNameBuf[fobNameLen++] = getMultitapChar();
+    fobNameBuf[fobNameLen]   = '\0';
+  }
+  mtKey    = '\0';
+  mtCount  = 0;
+  mtLastMs = 0;
+}
+
+// Handle a single keypad press while in name-entry mode.
+void processNameEntryKey(char key) {
+  if (key == '#') {
+    // Confirm: commit any pending char then save
+    commitMultitapChar();
+    saveUIDToEEPROM();
+    nameEntryMode = false;
+    Serial.print(F("Fob stored! Name: "));
+    Serial.println(fobNameBuf[0] ? fobNameBuf : "(none)");
+    Serial.print(F("UID: "));
+    printUID(correctUID, correctUIDSize);
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("** FOB STORED **    ");
+    lcd.setCursor(0, 1);
+    if (fobNameLen > 0) {
+      char line[21];
+      // Truncate name at 14 chars: "Name: " (6) + name (14) = 20.
+      snprintf(line, sizeof(line), "Name: %-14.14s", fobNameBuf);
+      lcd.print(line);
+    } else {
+      lcd.print("(no name given)     ");
+    }
+    lcd.setCursor(0, 2);
+    lcd.print("Scan it to activate.");
+    scheduleHome(3000);
+
+  } else if (key == '*') {
+    if (mtKey != '\0') {
+      // Discard the current cycling character
+      mtKey    = '\0';
+      mtCount  = 0;
+      mtLastMs = 0;
+      showNameEntry();
+    } else if (fobNameLen > 0) {
+      // Delete the last confirmed character
+      fobNameBuf[--fobNameLen] = '\0';
+      showNameEntry();
+    } else {
+      // Name is empty — treat as cancel
+      nameEntryMode = false;
+      Serial.println(F("Name entry cancelled."));
+      showHome();
+    }
+
+  } else if (key >= '0' && key <= '9') {
+    if (fobNameLen >= FOB_NAME_MAX_LEN && mtKey == '\0') {
+      // Name is at maximum length — show brief feedback on row 2
+      lcd.setCursor(0, 2);
+      lcd.print("Name full! Use *    ");
+      return;
+    }
+    if (key == mtKey) {
+      // Same key: advance to next character in the set
+      mtCount++;
+      mtLastMs = millis();
+    } else {
+      // Different key: commit previous char (if any) then start new
+      commitMultitapChar();
+      if (fobNameLen < FOB_NAME_MAX_LEN) {
+        mtKey    = key;
+        mtCount  = 0;
+        mtLastMs = millis();
+      } else {
+        // Committing the previous char filled the buffer — notify user
+        lcd.setCursor(0, 2);
+        lcd.print("Name full! Use *    ");
+        return;
+      }
+    }
+    showNameEntry();
+  }
+}
+
+// Called from loop() when nameEntryMode is active.
+void handleNameEntry() {
+  // Auto-commit on timeout
+  if (mtKey != '\0' && (millis() - mtLastMs) >= MT_COMMIT_MS) {
+    commitMultitapChar();
+    showNameEntry();
+  }
+  char key = keypad.getKey();
+  if (key != NO_KEY) {
+    processNameEntryKey(key);
+  }
 }
 
 // ── setup() ──────────────────────────────────────────────────────────────────
@@ -348,17 +565,23 @@ void setup() {
 // ── loop() ───────────────────────────────────────────────────────────────────
 
 void loop() {
-  // ── Non-blocking display timeout ──────────────────────────────────────────
-  if (showHomeDuration != 0 && (millis() - showHomeScheduledAt) >= showHomeDuration) {
-    showHome();
-  }
-
-  // ── LED auto-reset after LED_AUTO_RESET_MS (non-blocking) ─────────────────
+  // ── LED auto-reset after LED_AUTO_RESET_MS (non-blocking, any mode) ────────
   if (ledActive && ledActivatedAt != 0 && (millis() - ledActivatedAt) >= LED_AUTO_RESET_MS) {
     ledActive = false;
     ledActivatedAt = 0;
     digitalWrite(LED_PIN, LOW);
     Serial.println(F("LED auto-reset after 5 s."));
+    if (!nameEntryMode) showHome();
+  }
+
+  // ── Nokia multi-tap name entry ─────────────────────────────────────────────
+  if (nameEntryMode) {
+    handleNameEntry();
+    return;
+  }
+
+  // ── Non-blocking display timeout ──────────────────────────────────────────
+  if (showHomeDuration != 0 && (millis() - showHomeScheduledAt) >= showHomeDuration) {
     showHome();
   }
 
