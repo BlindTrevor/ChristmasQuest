@@ -3,17 +3,18 @@
  *
  * An RFID-based game for Arduino Mega 2560 R3.
  * Present the correct RFID fob to the RC522 reader to activate the onboard LED.
- * A 2004A LCD (via I2C) displays status messages and 4 buttons allow control.
+ * A 2004A LCD (via I2C) displays status messages and a 12-button keypad allows control.
  *
  * Hardware:
  *   - Arduino Mega 2560 R3
  *   - MFRC522 RFID reader
  *   - 2004A LCD display via I2C (address 0x27)
- *   - 4 push buttons
+ *   - 12-button keypad (3×4 matrix, 7-pin)
  *
  * Libraries required:
  *   - MFRC522 by Miguel Balboa (miguelbalboa)
  *   - LiquidCrystal_I2C by Frank de Brabander
+ *   - Keypad by Mark Stanley, Alexander Brevig
  *
  * See README.md for wiring details.
  */
@@ -23,6 +24,7 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <EEPROM.h>
+#include <Keypad.h>
 
 // ── Pin Definitions ──────────────────────────────────────────────────────────
 
@@ -33,12 +35,32 @@
 // Onboard LED
 #define LED_PIN   13
 
-// Buttons (INPUT_PULLUP – connect each button between pin and GND)
-static const uint8_t BTN_PINS[] = { 2, 3, 4, 5 };
-static const uint8_t NUM_BUTTONS = 4;
+// ── Keypad (3×4 matrix, 7-pin) ───────────────────────────────────────────────
+//
+// Standard layout:
+//   1  2  3
+//   4  5  6
+//   7  8  9
+//   *  0  #
+//
+// Wiring (left-to-right pinout: R1 R2 R3 R4 C1 C2 C3):
+//   R1 → D2,  R2 → D3,  R3 → D4,  R4 → D5
+//   C1 → D6,  C2 → D7,  C3 → D8
 
-// Debounce period in milliseconds
-#define DEBOUNCE_MS 50UL
+static const byte KP_ROWS = 4;
+static const byte KP_COLS = 3;
+
+static char keys[KP_ROWS][KP_COLS] = {
+  { '1', '2', '3' },
+  { '4', '5', '6' },
+  { '7', '8', '9' },
+  { '*', '0', '#' }
+};
+
+static byte rowPins[KP_ROWS] = { 2, 3, 4, 5 };   // R1 R2 R3 R4
+static byte colPins[KP_COLS] = { 6, 7, 8 };       // C1 C2 C3
+
+Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, KP_ROWS, KP_COLS);
 
 // LED auto-reset timeout: the LED turns off automatically after this many ms.
 // The timer resets each time the LED is re-activated within the window.
@@ -56,7 +78,7 @@ MFRC522 mfrc522(SS_PIN, RST_PIN);
 // ── Correct Fob UID ──────────────────────────────────────────────────────────
 //
 // This is the fallback UID used when no fob has been stored in EEPROM yet.
-// To set the correct fob at runtime, press Button 4 and scan a fob.
+// To set the correct fob at runtime, press Key 4 on the keypad and scan a fob.
 // The new UID is saved to EEPROM and survives power cycles.
 //
 byte correctUID[]   = { 0xDE, 0xAD, 0xBE, 0xEF };
@@ -87,9 +109,6 @@ unsigned long ledActivatedAt = 0;
 unsigned long showHomeScheduledAt = 0;
 unsigned long showHomeDuration    = 0;
 
-// Per-button debounce: timestamp of the last confirmed press.
-unsigned long lastBtnPressMs[NUM_BUTTONS] = { 0, 0, 0, 0 };
-
 // ── Helper: display the idle / home screen ───────────────────────────────────
 
 void showHome() {
@@ -101,7 +120,7 @@ void showHome() {
     lcd.setCursor(0, 1);
     lcd.print("STORE MODE: scan fob");
     lcd.setCursor(0, 2);
-    lcd.print("Btn4 again to cancel");
+    lcd.print("Key4 again to cancel");
   } else {
     lcd.setCursor(0, 1);
     lcd.print("Scan your fob...    ");
@@ -162,22 +181,20 @@ bool isCorrectFob() {
   return true;
 }
 
-// ── Helper: non-blocking button debounce ─────────────────────────────────────
+// ── Helper: read a keypad key and map it to an action index ──────────────────
 //
-// Returns the index (0-3) of the first newly-pressed button, or -1 if none.
-// All button states are sampled first; only the lowest-indexed press is acted on.
+// Returns the action index (0–3) for keys '1'–'4', or -1 for any other key.
+// Debouncing is handled internally by the Keypad library.
 
 int8_t readButtonPress() {
-  unsigned long now = millis();
-  for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
-    if (digitalRead(BTN_PINS[i]) == LOW) {
-      if (now - lastBtnPressMs[i] > DEBOUNCE_MS) {
-        lastBtnPressMs[i] = now;
-        return (int8_t)i;
-      }
-    }
+  char key = keypad.getKey();
+  switch (key) {
+    case '1': return 0;   // Show instructions
+    case '2': return 1;   // Reset LED
+    case '3': return 2;   // Show LED status
+    case '4': return 3;   // Store fob (enter/cancel store mode)
+    default:  return -1;
   }
-  return -1;
 }
 
 // ── RFID Responses ───────────────────────────────────────────────────────────
@@ -313,10 +330,7 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
-  // Buttons (internal pull-up; connect button between pin and GND)
-  for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
-    pinMode(BTN_PINS[i], INPUT_PULLUP);
-  }
+  // Keypad pins are configured by the Keypad library automatically.
 
   Serial.println(F("ChristmasQuest ready."));
 
@@ -325,7 +339,7 @@ void setup() {
     printUID(correctUID, correctUIDSize);
   } else {
     Serial.println(F("No stored fob found. Using default UID."));
-    Serial.println(F("Press Btn4 and scan a fob to store one."));
+    Serial.println(F("Press Key4 and scan a fob to store one."));
   }
 
   showHome();
@@ -348,7 +362,7 @@ void loop() {
     showHome();
   }
 
-  // ── Button handling (non-blocking debounce; one press per iteration) ───────
+  // ── Keypad handling (one key per iteration) ────────────────────────────────
   int8_t btn = readButtonPress();
   if      (btn == 0) handleButtonInstructions();
   else if (btn == 1) handleButtonReset();
